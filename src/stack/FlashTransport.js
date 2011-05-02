@@ -1,5 +1,5 @@
 /*jslint evil: true, browser: true, immed: true, passfail: true, undef: true, newcap: true*/
-/*global easyXDM, window, getLocation, appendQueryParameters, createFrame, debug, apply, whenReady, IFRAME_PREFIX, namespace, getDomainName*/
+/*global global, easyXDM, window, getLocation, appendQueryParameters, createFrame, debug, apply, whenReady, IFRAME_PREFIX, namespace, getDomainName, query*/
 //
 // easyXDM
 // http://easyxdm.net/
@@ -43,9 +43,9 @@ easyXDM.stack.FlashTransport = function(config){
     }
     // #endif
     var pub, // the public interface
- frame, send, targetOrigin, swf, swfContainer, ns = (namespace ? namespace + "." : "");
+ frame, send, targetOrigin, swf, swfContainer;
     
-    function onMessage(message){
+    function onMessage(message, origin){
         setTimeout(function(){
             // #ifdef debug
             trace("received message");
@@ -58,12 +58,12 @@ easyXDM.stack.FlashTransport = function(config){
      * This method adds the SWF to the DOM and prepares the initialization of the channel
      */
     function addSwf(callback){
-        var url = config.swf;
+        // the differentiating query argument is needed in Flash9 to avoid a caching issue where LocalConnection would throw an error.
+        var url = config.swf + "?host=" + config.isHost;
         var id = "easyXDM_swf_" + Math.floor(Math.random() * 10000);
-        var init = ns + "easyXDM.Fn.get(\"flash_" + id + "_init\")";
         
         // prepare the init function that will fire once the swf is ready
-        easyXDM.Fn.set("flash_" + id + "_init", function(){
+        easyXDM.Fn.set("flash_loaded", function(){
             easyXDM.stack.FlashTransport.__swf = swf = swfContainer.firstChild;
             callback();
         });
@@ -80,7 +80,10 @@ easyXDM.stack.FlashTransport = function(config){
         document.body.appendChild(swfContainer);
         
         // create the object/embed
-        var flashVars = "proto=" + location.protocol + "&domain=" + getDomainName(location.href) + "&init=" + init;
+        var flashVars = "proto=" + global.location.protocol + "&domain=" + getDomainName(global.location.href) + "&ns=" + namespace;
+        // #ifdef debug
+        flashVars += "&log=true";
+        // #endif
         swfContainer.innerHTML = "<object height='1' width='1' type='application/x-shockwave-flash' id='" + id + "' data='" + url + "'>" +
         "<param name='allowScriptAccess' value='always'></param>" +
         "<param name='wmode' value='transparent'>" +
@@ -100,7 +103,7 @@ easyXDM.stack.FlashTransport = function(config){
     
     return (pub = {
         outgoing: function(message, domain, fn){
-            swf.postMessage(config.channel, message);
+            swf.postMessage(config.channel, message.toString());
             if (fn) {
                 fn();
             }
@@ -125,33 +128,27 @@ easyXDM.stack.FlashTransport = function(config){
             trace("init");
             // #endif
             
-            targetOrigin = getLocation(config.remote);
+            targetOrigin = config.remote;
             swf = easyXDM.stack.FlashTransport.__swf;
             
             /**
              * Prepare the code that will be run after the swf has been intialized
              */
+            easyXDM.Fn.set("flash_" + config.channel + "_init", function(){
+                setTimeout(function(){
+                    // #ifdef debug
+                    trace("firing onReady");
+                    // #endif
+                    pub.up.callback(true);
+                });
+            });
+            
+            // set up the omMessage handler
+            easyXDM.Fn.set("flash_" + config.channel + "_onMessage", onMessage);
+            
             var fn = function(){
-                // set up the omMessage handler
-                if (config.isHost) {
-                    easyXDM.Fn.set("flash_" + config.channel + "_onMessage", function(message){
-                        if (message == config.channel + "-ready") {
-                            easyXDM.Fn.set("flash_" + config.channel + "_onMessage", onMessage);
-                            setTimeout(function(){
-                                // #ifdef debug
-                                trace("firing onReady");
-                                // #endif
-                                pub.up.callback(true);
-                            }, 0);
-                        }
-                    });
-                }
-                else {
-                    easyXDM.Fn.set("flash_" + config.channel + "_onMessage", onMessage);
-                }
-                
                 // create the channel
-                swf.createChannel(config.channel, config.remote, config.isHost, ns + "easyXDM.Fn.get(\"flash_" + config.channel + "_onMessage\")", config.secret);
+                swf.createChannel(config.channel, config.secret, getLocation(config.remote), config.isHost);
                 
                 if (config.isHost) {
                     // set up the iframe
@@ -159,22 +156,12 @@ easyXDM.stack.FlashTransport = function(config){
                         src: appendQueryParameters(config.remote, {
                             xdm_e: getLocation(location.href),
                             xdm_c: config.channel,
-                            xdm_s: config.secret,
-                            xdm_p: 6 // 6 = FlashTransport
+                            xdm_p: 6, // 6 = FlashTransport
+                            xdm_s: config.secret
                         }),
                         name: IFRAME_PREFIX + config.channel + "_provider"
                     });
                     frame = createFrame(config);
-                }
-                else {
-                    // signal to the remote end that we are ready, and fire the callback
-                    swf.postMessage(config.channel, config.channel + "-ready");
-                    setTimeout(function(){
-                        // #ifdef debug
-                        trace("firing onReady");
-                        // #endif
-                        pub.up.callback(true);
-                    }, 0);
                 }
             };
             
